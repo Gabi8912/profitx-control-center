@@ -379,12 +379,6 @@ async def on_chat_member(
             else "➖"
         )
 
-        action = (
-            "вступил(а)"
-            if event_type == "joined"
-            else "вышел(а)"
-        )
-
         place = (
             "канал"
             if chat.type == "channel"
@@ -395,11 +389,16 @@ async def on_chat_member(
             f"{full_name} {username_text}"
         ).strip()
 
-        message = (
-            f"{symbol} {details} {action} "
-            f"в {place} "
-            f"«{chat.title or chat.id}»."
-        )
+        if event_type == "joined":
+            message = (
+                f"{symbol} {details} вступил(а) "
+                f"в {place} «{chat.title or chat.id}»."
+            )
+        else:
+            message = (
+                f"{symbol} {details} вышел(а) "
+                f"из {place} «{chat.title or chat.id}»."
+            )
 
         if invite_link and event_type == "joined":
             message += (
