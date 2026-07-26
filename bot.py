@@ -181,7 +181,7 @@ async def stats(
             "Эта команда доступна только владельцу."
         )
         return
-[26.07.2026 7:03] 🄶 Gabriel: counts = get_event_counts(days=None)
+        counts = get_event_counts(days=None)
     today_counts = get_event_counts(days=1)
 
     channel_ref = get_channel_reference()
@@ -368,8 +368,7 @@ async def on_chat_member(
 
 async def on_my_chat_member(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-[26.07.2026 7:03] 🄶 Gabriel: ) -> None:
+    context: ContextTypes.DEFAULT_TYPE,) -> None:
     change = update.my_chat_member
 
     if not change:
