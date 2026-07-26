@@ -1,23 +1,18 @@
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update
 from telegram.constants import ChatMemberStatus
-from telegram.ext import (
-    Application,
-    ChatMemberHandler,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, ChatMemberHandler, CommandHandler, ContextTypes
 
 from database import (
-    init_db,
-    record_event,
     get_event_counts,
     get_known_channel_id,
+    init_db,
+    record_event,
     save_setting,
 )
 
@@ -34,24 +29,28 @@ def env_int(name: str) -> int | None:
         return None
     try:
         return int(value)
-    except ValueError:
-        raise RuntimeError(f"{name} должен быть целым числом")
+    except ValueError as exc:
+        raise RuntimeError(f"{name} должен быть целым числом") from exc
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_CHAT_ID = env_int("ADMIN_CHAT_ID")
 CHANNEL_ID = env_int("CHANNEL_ID")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
+
+if CHANNEL_USERNAME and not CHANNEL_USERNAME.startswith("@"):
+    CHANNEL_USERNAME = f"@{CHANNEL_USERNAME}"
 
 
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def do_GET(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"PROFITx Control Center is running")
 
-    def log_message(self, format, *args):
+    def log_message(self, format: str, *args) -> None:
         return
 
 
@@ -62,11 +61,23 @@ def run_health_server() -> None:
 
 
 def is_member(status: str, is_member_flag: bool | None = None) -> bool:
-    if status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+    if status in (
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.OWNER,
+    ):
         return True
     if status == ChatMemberStatus.RESTRICTED:
         return bool(is_member_flag)
     return False
+
+
+def get_channel_reference() -> int | str | None:
+    if CHANNEL_ID:
+        return CHANNEL_ID
+    if CHANNEL_USERNAME:
+        return CHANNEL_USERNAME
+    return get_known_channel_id()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -76,8 +87,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Ваш Telegram ID: <code>{user.id}</code>\n\n"
         "Команды:\n"
         "/stats — статистика вступлений и выходов\n"
-        "/today — события за сегодня\n"
-        "/id — показать ваш ID"
+        "/today — события за последние 24 часа\n"
+        "/id — показать ваш Telegram ID"
     )
     await update.effective_message.reply_html(text)
 
@@ -90,28 +101,34 @@ async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if ADMIN_CHAT_ID and update.effective_user.id != ADMIN_CHAT_ID:
-        await update.effective_message.reply_text("Эта команда доступна владельцу.")
+        await update.effective_message.reply_text(
+            "Эта команда доступна только владельцу."
+        )
         return
 
     counts = get_event_counts(days=None)
-    today = get_event_counts(days=1)
-    channel_id = CHANNEL_ID or get_known_channel_id()
+    today_counts = get_event_counts(days=1)
+    channel_ref = get_channel_reference()
 
     total_text = "не удалось получить"
-    if channel_id:
+    if channel_ref:
         try:
-            total = await context.bot.get_chat_member_count(channel_id)
+            total = await context.bot.get_chat_member_count(chat_id=channel_ref)
             total_text = str(total)
         except Exception as exc:
-            logger.warning("Cannot get member count: %s", exc)
+            logger.exception(
+                "Не удалось получить число подписчиков для %s: %s",
+                channel_ref,
+                exc,
+            )
 
     await update.effective_message.reply_text(
         "📊 PROFITx — статистика\n\n"
         f"Подписчиков сейчас: {total_text}\n"
-        f"Сегодня вступили: {today['joined']}\n"
-        f"Сегодня вышли: {today['left']}\n"
-        f"Итог сегодня: {today['joined'] - today['left']:+d}\n\n"
-        f"С момента запуска бота:\n"
+        f"Сегодня вступили: {today_counts['joined']}\n"
+        f"Сегодня вышли: {today_counts['left']}\n"
+        f"Итог сегодня: {today_counts['joined'] - today_counts['left']:+d}\n\n"
+        "С момента запуска бота:\n"
         f"Вступили: {counts['joined']}\n"
         f"Вышли: {counts['left']}"
     )
@@ -119,8 +136,11 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if ADMIN_CHAT_ID and update.effective_user.id != ADMIN_CHAT_ID:
-        await update.effective_message.reply_text("Эта команда доступна владельцу.")
+        await update.effective_message.reply_text(
+            "Эта команда доступна только владельцу."
+        )
         return
+
     counts = get_event_counts(days=1)
     await update.effective_message.reply_text(
         "📅 За последние 24 часа\n\n"
@@ -147,7 +167,7 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     event_type = "joined" if new_member else "left"
-    username = f"@{user.username}" if user.username else ""
+    username_text = f"@{user.username}" if user.username else ""
     full_name = user.full_name or "Без имени"
     invite_link = change.invite_link.invite_link if change.invite_link else None
 
@@ -161,32 +181,39 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         invite_link=invite_link,
         event_time=change.date.astimezone(timezone.utc),
     )
+
     save_setting("channel_id", str(chat.id))
 
     if ADMIN_CHAT_ID:
         symbol = "➕" if event_type == "joined" else "➖"
         action = "вступил(а)" if event_type == "joined" else "вышел(а)"
-        details = f"{full_name} {username}".strip()
-        message = f"{symbol} {details} {action} из канала «{chat.title}»."
+        details = f"{full_name} {username_text}".strip()
+        message = f"{symbol} {details} {action} из канала «{chat.title or chat.id}»."
+
         if invite_link and event_type == "joined":
             message += f"\n🔗 Ссылка: {invite_link}"
+
         try:
-            await context.bot.send_message(ADMIN_CHAT_ID, message)
+            await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message)
         except Exception as exc:
-            logger.warning("Cannot notify admin: %s", exc)
+            logger.exception("Не удалось отправить уведомление владельцу: %s", exc)
 
 
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     change = update.my_chat_member
     if not change:
         return
+
     logger.info(
-        "Bot status changed in %s (%s): %s -> %s",
+        "Статус бота изменён в чате %s (%s): %s -> %s",
         change.chat.title,
         change.chat.id,
         change.old_chat_member.status,
         change.new_chat_member.status,
     )
+
+    if change.chat.type == "channel":
+        save_setting("channel_id", str(change.chat.id))
 
 
 def main() -> None:
@@ -194,19 +221,22 @@ def main() -> None:
         raise RuntimeError("Не задана переменная BOT_TOKEN")
 
     init_db()
-
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
+    threading.Thread(target=run_health_server, daemon=True).start()
 
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("id", show_id))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("today", today))
-    application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
-    application.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    application.add_handler(
+        ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER)
+    )
+    application.add_handler(
+        ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
+    )
 
-    logger.info("PROFITx bot is starting")
+    logger.info("PROFITx bot is starting. Channel: %s", get_channel_reference())
+
     application.run_polling(
         allowed_updates=["message", "chat_member", "my_chat_member"],
         drop_pending_updates=False,
@@ -215,3 +245,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
