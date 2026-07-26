@@ -16,6 +16,8 @@ from telegram.ext import (
 from database import (
     get_event_counts,
     get_known_channel_id,
+    get_last_join_invite_link,
+    get_source_stats,
     init_db,
     record_event,
     save_setting,
@@ -49,6 +51,8 @@ ADMIN_CHAT_ID = env_int("ADMIN_CHAT_ID")
 CHANNEL_ID = env_int("CHANNEL_ID")
 GROUP_CHAT_ID = env_int("GROUP_CHAT_ID")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()
+INSTAGRAM_INVITE_LINK = os.getenv("INSTAGRAM_INVITE_LINK", "").strip()
+YOUTUBE_INVITE_LINK = os.getenv("YOUTUBE_INVITE_LINK", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
 if CHANNEL_USERNAME and not CHANNEL_USERNAME.startswith("@"):
@@ -131,6 +135,8 @@ async def start(
         "Команды:\n"
         "/stats — полная статистика\n"
         "/today — статистика за последние 24 часа\n"
+        "/sources — источники подписчиков канала\n"
+        "/dashboard — общая панель аналитики\n"
         "/id — показать ID пользователя и чата"
     )
 
@@ -196,6 +202,122 @@ def format_block(
         f"Итог сегодня: {today_result:+d}\n"
         f"Всего вступили: {total_counts['joined']}\n"
         f"Всего вышли: {total_counts['left']}"
+    )
+
+
+def source_links() -> dict[str, str]:
+    return {
+        "instagram": INSTAGRAM_INVITE_LINK,
+        "youtube": YOUTUBE_INVITE_LINK,
+    }
+
+
+def source_name(invite_link: str | None) -> str:
+    link = (invite_link or "").strip()
+    if link and link == INSTAGRAM_INVITE_LINK:
+        return "📸 Instagram"
+    if link and link == YOUTUBE_INVITE_LINK:
+        return "▶️ YouTube"
+    return "🔗 Другой источник"
+
+
+def format_source_stats(
+    stats_data: dict[str, dict[str, int]],
+    include_active: bool = True,
+) -> str:
+    labels = {
+        "instagram": "📸 Instagram",
+        "youtube": "▶️ YouTube",
+        "other": "🔗 Другие источники",
+    }
+    blocks: list[str] = []
+    for key in ("instagram", "youtube", "other"):
+        item = stats_data[key]
+        lines = [
+            labels[key],
+            f"➕ Всего пришли: {item['joined']}",
+            f"➖ Отписались: {item['left']}",
+        ]
+        if include_active:
+            lines.insert(1, f"👥 Сейчас отслеживается: {item['active']}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+async def sources(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if ADMIN_CHAT_ID and update.effective_user.id != ADMIN_CHAT_ID:
+        await update.effective_message.reply_text(
+            "Эта команда доступна только владельцу."
+        )
+        return
+
+    data = get_source_stats(
+        chat_id=get_channel_numeric_id(),
+        source_links=source_links(),
+        days=None,
+    )
+    await update.effective_message.reply_text(
+        "📊 Источники подписчиков канала PROFITx\n\n"
+        + format_source_stats(data)
+        + "\n\nℹ️ Учёт начинается с момента запуска этой версии бота."
+    )
+
+
+async def dashboard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if ADMIN_CHAT_ID and update.effective_user.id != ADMIN_CHAT_ID:
+        await update.effective_message.reply_text(
+            "Эта команда доступна только владельцу."
+        )
+        return
+
+    channel_id = get_channel_numeric_id()
+    channel_total = await get_member_count(context, get_channel_reference())
+    group_total = await get_member_count(context, GROUP_CHAT_ID)
+    today_channel = get_event_counts(days=1, chat_id=channel_id)
+    today_sources = get_source_stats(
+        chat_id=channel_id,
+        source_links=source_links(),
+        days=1,
+    )
+    all_sources = get_source_stats(
+        chat_id=channel_id,
+        source_links=source_links(),
+        days=None,
+    )
+
+    await update.effective_message.reply_text(
+        "📊 PROFITx — Dashboard\n\n"
+        "📢 Канал PROFITx\n"
+        f"👥 Подписчиков сейчас: {channel_total}\n"
+        f"➕ Сегодня пришли: {today_channel['joined']}\n"
+        f"➖ Сегодня ушли: {today_channel['left']}\n"
+        f"📈 Итог сегодня: "
+        f"{today_channel['joined'] - today_channel['left']:+d}\n\n"
+        "📍 Источники за сегодня\n"
+        f"📸 Instagram: +{today_sources['instagram']['joined']} "
+        f"/ -{today_sources['instagram']['left']}\n"
+        f"▶️ YouTube: +{today_sources['youtube']['joined']} "
+        f"/ -{today_sources['youtube']['left']}\n"
+        f"🔗 Другие: +{today_sources['other']['joined']} "
+        f"/ -{today_sources['other']['left']}\n\n"
+        "📚 Источники с момента запуска учёта\n"
+        f"📸 Instagram: пришли {all_sources['instagram']['joined']}, "
+        f"ушли {all_sources['instagram']['left']}, "
+        f"активны {all_sources['instagram']['active']}\n"
+        f"▶️ YouTube: пришли {all_sources['youtube']['joined']}, "
+        f"ушли {all_sources['youtube']['left']}, "
+        f"активны {all_sources['youtube']['active']}\n"
+        f"🔗 Другие: пришли {all_sources['other']['joined']}, "
+        f"ушли {all_sources['other']['left']}, "
+        f"активны {all_sources['other']['active']}\n\n"
+        "💬 Закрытая группа CashFlow\n"
+        f"👥 Участников сейчас: {group_total}"
     )
 
 
@@ -353,6 +475,12 @@ async def on_chat_member(
         else None
     )
 
+    if event_type == "left" and not invite_link:
+        invite_link = get_last_join_invite_link(
+            chat_id=chat.id,
+            user_id=user.id,
+        )
+
     record_event(
         chat_id=chat.id,
         chat_title=chat.title or "",
@@ -400,10 +528,10 @@ async def on_chat_member(
                 f"из {place} «{chat.title or chat.id}»."
             )
 
-        if invite_link and event_type == "joined":
-            message += (
-                f"\n🔗 Ссылка: {invite_link}"
-            )
+        if chat.type == "channel":
+            message += f"\nИсточник: {source_name(invite_link)}"
+        elif invite_link and event_type == "joined":
+            message += f"\n🔗 Ссылка: {invite_link}"
 
         try:
             await context.bot.send_message(
@@ -474,6 +602,12 @@ def main() -> None:
     )
     application.add_handler(
         CommandHandler("today", today)
+    )
+    application.add_handler(
+        CommandHandler("sources", sources)
+    )
+    application.add_handler(
+        CommandHandler("dashboard", dashboard)
     )
 
     application.add_handler(
